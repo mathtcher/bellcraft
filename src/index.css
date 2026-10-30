@@ -776,6 +776,15 @@ input, select {
   margin-bottom: 10px;
 }
 
+/* ==================== Post-generate schedule tweaks ==================== */
+
+.schedule-tweak {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px 2px;
+  margin-bottom: 12px;
+}
+
 /* ==================== List rows (preferences, special blocks) ==================== */
 
 .checkbox-row-spaced {

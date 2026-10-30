@@ -32,6 +32,14 @@ export default function Builder({ params, hasSchedule, dispatch }: BuilderProps)
 
   const preview = useMemo(() => generateSchedule(params), [params]);
   const fitError = preview === null;
+  const splitPeriodConflict =
+    params.hasSplitLunch &&
+    params.hasSplitAssembly &&
+    Math.min(params.splitLunchPeriod, params.numPeriods) === Math.min(params.splitAssemblyPeriod, params.numPeriods);
+  const excludedPeriods = [
+    ...(params.hasSplitLunch ? [params.splitLunchPeriod] : []),
+    ...(params.hasSplitAssembly ? [params.splitAssemblyPeriod] : []),
+  ];
 
   const handleGenerate = () => {
     if (!preview) return;
@@ -44,8 +52,8 @@ export default function Builder({ params, hasSchedule, dispatch }: BuilderProps)
 
   const updateAdjustments = (next: PeriodAdjustment[]) => set('periodAdjustments', next);
   const addAdjustment = () => {
-    const excluded = params.hasSplitLunch ? params.splitLunchPeriod : -1;
-    const defaultPeriod = 1 === excluded ? Math.min(2, params.numPeriods) : 1;
+    let defaultPeriod = 1;
+    while (excludedPeriods.includes(defaultPeriod) && defaultPeriod < params.numPeriods) defaultPeriod++;
     updateAdjustments([...params.periodAdjustments, { id: uid(), period: defaultPeriod, offsetMinutes: 5 }]);
   };
   const updateAdjustment = (id: string, patch: Partial<PeriodAdjustment>) =>
@@ -269,6 +277,51 @@ export default function Builder({ params, hasSchedule, dispatch }: BuilderProps)
       </div>
 
       <div className="builder-section">
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={params.hasSplitAssembly}
+            onChange={e => set('hasSplitAssembly', e.target.checked)}
+          />
+          <span>Split assembly within a period</span>
+        </label>
+
+        {params.hasSplitAssembly && (
+          <div className="builder-subsection">
+            <Stepper
+              label="Assembly During Period"
+              value={params.splitAssemblyPeriod}
+              onChange={v => set('splitAssemblyPeriod', v)}
+              min={1}
+              max={Math.max(1, params.numPeriods)}
+            />
+            <Stepper
+              label="Assembly Length"
+              value={params.splitAssemblyLength}
+              onChange={v => set('splitAssemblyLength', v)}
+              min={5}
+              max={180}
+              step={5}
+              suffix=" min"
+            />
+            <div>
+              <label className="field-label" htmlFor="assembly-name">Assembly Name</label>
+              <input
+                id="assembly-name"
+                type="text"
+                className="text-input"
+                value={params.splitAssemblyName}
+                onChange={e => set('splitAssemblyName', e.target.value)}
+              />
+            </div>
+            <p className="field-hint">
+              One group attends first, then has Period {params.splitAssemblyPeriod}B; the other has Period {params.splitAssemblyPeriod}A, then attends. Class runs at least as long as the assembly so the venue can turn over between groups, and other periods shorten if needed.
+            </p>
+          </div>
+        )}
+      </div>
+
+      <div className="builder-section">
         <h3 className="section-title">Preferences</h3>
         <p className="field-hint">Make a period run longer or shorter than the rest when it fits (e.g. +5 min on Period 1 for announcements).</p>
         {params.periodAdjustments.map(adj => (
@@ -276,7 +329,7 @@ export default function Builder({ params, hasSchedule, dispatch }: BuilderProps)
             key={adj.id}
             adjustment={adj}
             numPeriods={params.numPeriods}
-            excludePeriod={params.hasSplitLunch ? params.splitLunchPeriod : undefined}
+            excludePeriods={excludedPeriods}
             onChange={patch => updateAdjustment(adj.id, patch)}
             onRemove={() => removeAdjustment(adj.id)}
           />
@@ -311,7 +364,9 @@ export default function Builder({ params, hasSchedule, dispatch }: BuilderProps)
 
       {fitError && (
         <div className="error-message">
-          This schedule doesn't fit in the available time. Reduce periods, passing time, or lunch/break/special block length — or extend the day.
+          {splitPeriodConflict
+            ? "Lunch and the assembly can't split the same period. Move one of them to a different period."
+            : "This schedule doesn't fit in the available time. Reduce periods, passing time, or lunch/break/special block/assembly length — or extend the day."}
         </div>
       )}
 
@@ -330,15 +385,15 @@ export default function Builder({ params, hasSchedule, dispatch }: BuilderProps)
 interface AdjustmentRowProps {
   adjustment: PeriodAdjustment;
   numPeriods: number;
-  excludePeriod?: number;
+  excludePeriods: number[];
   onChange: (patch: Partial<PeriodAdjustment>) => void;
   onRemove: () => void;
 }
 
-function AdjustmentRow({ adjustment, numPeriods, excludePeriod, onChange, onRemove }: AdjustmentRowProps) {
+function AdjustmentRow({ adjustment, numPeriods, excludePeriods, onChange, onRemove }: AdjustmentRowProps) {
   const periodOptions: number[] = [];
   for (let i = 1; i <= numPeriods; i++) {
-    if (i !== excludePeriod) periodOptions.push(i);
+    if (!excludePeriods.includes(i)) periodOptions.push(i);
   }
 
   return (

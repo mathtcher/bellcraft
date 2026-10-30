@@ -2,9 +2,10 @@ import { useMemo, useState } from 'react';
 import type { Dispatch } from 'react';
 import type { Block, Schedule } from '../types';
 import type { Action } from '../appState';
-import { computeBlockTimes, rebalanceBlocks } from '../utils/scheduleEngine';
+import { computeBlockTimes, generateSchedule, rebalanceBlocks } from '../utils/scheduleEngine';
 import { minsToTime, timeToMins } from '../utils/timeUtils';
 import { exportToPDF, exportToCSV } from '../utils/pdfExport';
+import Stepper from './Stepper';
 
 interface ScheduleViewProps {
   schedule: Schedule | null;
@@ -105,6 +106,24 @@ export default function ScheduleView({ schedule, passingTime, schoolName, school
     dispatch({ type: 'TOGGLE_LOCK', id });
   };
 
+  const sourceParams = schedule.sourceParams?.hasSplitAssembly ? schedule.sourceParams : null;
+
+  const handleLoadTimeChange = (loadTime: number) => {
+    if (!sourceParams) return;
+    const extra = loadTime - sourceParams.passingTime;
+    const next = generateSchedule({ ...sourceParams, splitAssemblyExtraLoad: extra });
+    if (!next) {
+      setNotification(`${loadTime} min to get seated doesn't fit in the day. Shorten the assembly or extend the day.`);
+      return;
+    }
+    dispatch({ type: 'SET_PARAM', key: 'splitAssemblyExtraLoad', value: extra });
+    // Same schedule, new times: keep its identity so saving updates the Library copy.
+    dispatch({ type: 'SET_SCHEDULE', schedule: { ...next, id: schedule.id, createdAt: schedule.createdAt } });
+    setNotification(
+      `${loadTime} min to get seated — times recalculated.${hasEdits ? ' Period lengths you edited by hand were reset.' : ''}`
+    );
+  };
+
   return (
     <div className="schedule-view">
       <div className="schedule-view-header">
@@ -128,6 +147,21 @@ export default function ScheduleView({ schedule, passingTime, schoolName, school
           <button type="button" className="notification-dismiss" onClick={() => setNotification(null)} aria-label="Dismiss">
             ×
           </button>
+        </div>
+      )}
+
+      {sourceParams && (
+        <div className="schedule-tweak">
+          <Stepper
+            label="Time to get seated for the assembly"
+            value={sourceParams.passingTime + sourceParams.splitAssemblyExtraLoad}
+            onChange={handleLoadTimeChange}
+            min={sourceParams.passingTime}
+            max={sourceParams.passingTime + 30}
+            step={5}
+            suffix=" min"
+          />
+          <p className="field-hint">Need longer to fill the venue? Add time here and the rest of the day adjusts.</p>
         </div>
       )}
 

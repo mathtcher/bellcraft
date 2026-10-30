@@ -85,6 +85,30 @@ export default function Help() {
         </section>
 
         <section className="help-section">
+          <h3>Split assembly</h3>
+          <p>
+            Turn on <strong>Split assembly within a period</strong> when the whole school can't fit
+            in the venue at once. Pick the period and how long the assembly lasts. One group attends
+            first and then has class (e.g. Period 3B), while the other has class first (Period 3A)
+            and then attends. BellCraft shortens the day's periods to make room, and both groups
+            start the next period together.
+          </p>
+          <p>
+            Passing time runs before and after each assembly so students can walk to and from the
+            venue. Class time during the split always lasts at least as long as the assembly, which
+            keeps the two assemblies from overlapping. If a normal period would be shorter than the
+            assembly, the other periods shorten to make up the difference. A period can't be split
+            for both lunch and an assembly.
+          </p>
+          <p>
+            If students need longer to get seated, use <strong>Time to get seated for the
+            assembly</strong> above the generated schedule. It gives each group more time before its
+            assembly and recalculates the day. Any period lengths you edited by hand reset when
+            this happens.
+          </p>
+        </section>
+
+        <section className="help-section">
           <h3>Preferences</h3>
           <p>
             Add a standing rule like "Period 1 should run 5 minutes longer than the rest" — enter

@@ -10,6 +10,7 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
     name, startTime, endTime, numPeriods, passingTime,
     lunchLength, numLunches, lunchAfterPeriod,
     hasSplitLunch, splitLunchPeriod, splitLunchSymmetric,
+    hasSplitAssembly, splitAssemblyPeriod, splitAssemblyLength, splitAssemblyName, splitAssemblyExtraLoad,
     hasBreak, breakBeforePeriod, breakLength, breakName, color,
     periodAdjustments, specialBlocks,
   } = params;
@@ -21,6 +22,12 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
   const effectiveSplitPeriod = hasSplitLunch
     ? Math.min(Math.max(1, splitLunchPeriod), numPeriods)
     : -1;
+  const effectiveAssemblyPeriod = hasSplitAssembly
+    ? Math.min(Math.max(1, splitAssemblyPeriod), numPeriods)
+    : -1;
+
+  // One period can't be split for both lunch and an assembly.
+  if (effectiveAssemblyPeriod === effectiveSplitPeriod && hasSplitAssembly) return null;
 
   // Non-instructional time. A break absorbs the passing gap that would normally
   // precede it into its own displayed span, so passingTotal still just counts one
@@ -43,9 +50,13 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
       ? 2 * passingTime + lunchLength
       : lunchLength + (splitLunchSymmetric ? passingTime : 0))
     : 0;
+  // A split assembly always gets a gap on both sides of the swap, since both groups have
+  // to walk to the assembly's venue and back. Getting seated can take longer than passing.
+  const assemblyLoadTime = passingTime + splitAssemblyExtraLoad;
+  const assemblyExtra = hasSplitAssembly ? splitAssemblyLength + assemblyLoadTime : 0;
 
   const validAdjustments = periodAdjustments.filter(
-    adj => !(hasSplitLunch && adj.period === effectiveSplitPeriod)
+    adj => adj.period !== effectiveSplitPeriod && adj.period !== effectiveAssemblyPeriod
   );
   const offsetByPeriod = new Map<number, number>();
   for (const adj of validAdjustments) {
@@ -53,16 +64,32 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
   }
   const sumOffsets = validAdjustments.reduce((sum, adj) => sum + adj.offsetMinutes, 0);
 
-  const instructionalPool = totalMins - passingTotal - lunchTotal - breakTotal - specialTotal - splitExtra;
+  const instructionalPool = totalMins - passingTotal - lunchTotal - breakTotal - specialTotal - splitExtra - assemblyExtra;
   const adjustedPool = instructionalPool - sumOffsets;
   const periodsCount = numPeriods;
 
   if (periodsCount <= 0 || adjustedPool <= 0 || adjustedPool / periodsCount < 1) return null;
 
-  const periodLen = Math.floor(adjustedPool / periodsCount);
-  const remainder = adjustedPool - periodLen * periodsCount;
-  // Remainder goes to Period 1, unless Period 1 is the split-lunch period.
-  const remainderTarget = hasSplitLunch && effectiveSplitPeriod === 1 ? 2 : 1;
+  let periodLen = Math.floor(adjustedPool / periodsCount);
+  let remainder = adjustedPool - periodLen * periodsCount;
+  // The class block of a split assembly must outlast the assembly plus any extra seating
+  // time: the second group can't start walking over until the first has been let out.
+  // When a normal period would be too short, the other periods give up the difference.
+  const minAssemblyClassLen = splitAssemblyLength + splitAssemblyExtraLoad;
+  let assemblyClassLen = periodLen;
+  if (hasSplitAssembly && periodLen < minAssemblyClassLen) {
+    const otherPeriods = periodsCount - 1;
+    const otherPool = adjustedPool - minAssemblyClassLen;
+    if (otherPeriods === 0 || otherPool / otherPeriods < 1) return null;
+    periodLen = Math.floor(otherPool / otherPeriods);
+    remainder = otherPool - periodLen * otherPeriods;
+    assemblyClassLen = minAssemblyClassLen;
+  }
+  // Remainder goes to the first period that isn't split for lunch or an assembly.
+  let remainderTarget = 1;
+  while (remainderTarget === effectiveSplitPeriod || remainderTarget === effectiveAssemblyPeriod) {
+    remainderTarget++;
+  }
 
   const blocks: Block[] = [];
 
@@ -147,6 +174,22 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
       // Track N: one full class block first, then lunch.
       pushSplitBlock('period', `Period ${i}A`, edgeDuration);
       pushSplitBlock('lunch', `Lunch ${numWaves}`, lunchLength);
+    } else if (i === effectiveAssemblyPeriod) {
+      // Two parallel tracks sharing this period's slot, in the same shape as a two-wave
+      // split lunch: one group attends first, the other attends after its class.
+      const assemblyName = splitAssemblyName || 'Assembly';
+      const pushAssemblyBlock = (type: 'period' | 'assembly', blockName: string, duration: number) => {
+        blocks.push({
+          id: makeId(), type, name: blockName, duration,
+          locked: type === 'assembly', edited: false, baseDuration: duration,
+          splitGroup: `assembly-${i}`, splitSymmetric: true, splitEdgeGap: assemblyLoadTime,
+        });
+      };
+
+      pushAssemblyBlock('assembly', `${assemblyName} 1`, splitAssemblyLength);
+      pushAssemblyBlock('period', `Period ${i}B`, assemblyClassLen);
+      pushAssemblyBlock('period', `Period ${i}A`, assemblyClassLen);
+      pushAssemblyBlock('assembly', `${assemblyName} 2`, splitAssemblyLength);
     } else {
       const dur = Math.max(
         1,
@@ -195,6 +238,7 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
     blocks,
     createdAt: new Date().toLocaleDateString(),
     color,
+    sourceParams: params,
   };
 }
 
@@ -247,8 +291,11 @@ export function computeBlockTimes(
       const cluster = blocks.slice(i, j);
       // Symmetric mode adds a passing gap on both sides of the swap in each edge track
       // (before Lunch 1, and after Lunch N) instead of just one side.
-      const edgeGap = block.splitSymmetric ? passingTime : 0;
-      const T0 = cursor;
+      const edgeGap = block.splitEdgeGap ?? (block.splitSymmetric ? passingTime : 0);
+      // With no period before this cluster, there's no passing gap to borrow from, so
+      // its leading gap starts at the bell instead of adding to the day.
+      const isFirstPeriod = !blocks.slice(0, i).some(b => b.type === 'period');
+      const T0 = isFirstPeriod && block.splitSymmetric ? cursor - passingTime : cursor;
 
       const lunch1 = cluster[0];
       const periodB = cluster[1];
@@ -292,7 +339,8 @@ export function computeBlockTimes(
       }
 
       cursor = clusterEnd;
-      if (blocks[j]) cursor += passingTime;
+      // A following split cluster provides its own leading passing gap.
+      if (blocks[j] && blocks[j].splitGroup === undefined) cursor += passingTime;
       i = j;
       continue;
     }
