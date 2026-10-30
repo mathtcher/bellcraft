@@ -29,34 +29,16 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
   // One period can't be split for both lunch and an assembly.
   if (effectiveAssemblyPeriod === effectiveSplitPeriod && hasSplitAssembly) return null;
 
-  // Non-instructional time. A break absorbs the passing gap that would normally
-  // precede it into its own displayed span, so passingTotal still just counts one
-  // gap per period-to-period transition regardless of what occupies that gap.
-  const passingTotal = passingTime * (numPeriods - 1);
-  const lunchTotal = hasSplitLunch ? 0 : lunchLength * numLunches;
-  const breakTotal = hasBreak ? breakLength : 0;
-  const specialTotal = specialBlocks.reduce((sum, sb) => sum + sb.length, 0);
   // Split lunch runs N parallel tracks (a lunch-first track, a class-first track, and
   // for 3+ waves, one or more "sandwiched" middle tracks whose class is split around
-  // their own lunch) that all resolve to the same clock time. The period itself still
-  // gets a full periodLen like every other period — only the extra time needed to fit
-  // everyone's lunch and transitions has to come out of the shared pool up front.
-  // A middle track needs 3 passing gaps (arriving, into lunch, out of lunch) — more
-  // than either edge track needs — so once a middle track exists it sets the pace.
+  // their own lunch) that all resolve to the same clock time.
   const numWaves = hasSplitLunch ? Math.max(2, numLunches) : 0;
   const hasMiddleWaves = numWaves >= 3;
-  const splitExtra = hasSplitLunch
-    ? (hasMiddleWaves
-      ? 2 * passingTime + lunchLength
-      : lunchLength + (splitLunchSymmetric ? passingTime : 0))
-    : 0;
-  // A split assembly always gets a gap on both sides of the swap, since both groups have
-  // to walk to the assembly's venue and back. Getting seated can take longer than passing.
+  // Getting seated for a split assembly can take longer than normal passing.
   const assemblyLoadTime = passingTime + splitAssemblyExtraLoad;
-  const assemblyExtra = hasSplitAssembly ? splitAssemblyLength + assemblyLoadTime : 0;
 
   const validAdjustments = periodAdjustments.filter(
-    adj => adj.period !== effectiveSplitPeriod && adj.period !== effectiveAssemblyPeriod
+    adj => adj.period <= numPeriods && adj.period !== effectiveSplitPeriod && adj.period !== effectiveAssemblyPeriod
   );
   const offsetByPeriod = new Map<number, number>();
   for (const adj of validAdjustments) {
@@ -64,7 +46,168 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
   }
   const sumOffsets = validAdjustments.reduce((sum, adj) => sum + adj.offsetMinutes, 0);
 
-  const instructionalPool = totalMins - passingTotal - lunchTotal - breakTotal - specialTotal - splitExtra - assemblyExtra;
+  // Remainder goes to the first period that isn't split for lunch or an assembly.
+  let remainderTarget = 1;
+  while (remainderTarget === effectiveSplitPeriod || remainderTarget === effectiveAssemblyPeriod) {
+    remainderTarget++;
+  }
+
+  const buildBlocks = (
+    periodLen: number,
+    assemblyClassLen: number,
+    remainder: number,
+    offsets: Map<number, number>
+  ): Block[] => {
+    const blocks: Block[] = [];
+
+    const pushSpecialBlocksAfter = (period: number) => {
+      for (const sb of specialBlocks) {
+        if (sb.afterPeriod === period) {
+          blocks.push({
+            id: makeId(),
+            type: 'assembly',
+            name: sb.name || 'Special Block',
+            duration: sb.length,
+            locked: true,
+            edited: false,
+            baseDuration: sb.length,
+          });
+        }
+      }
+    };
+
+    // A break directly after a period absorbs that period's passing gap into its own
+    // displayed span (starts immediately, shows passingTime + breakLength). A break
+    // preceded by anything else (e.g. a special block) shows its plain length instead,
+    // and the passing gap reappears before whichever period follows.
+    const pushBreak = () => {
+      const prev = blocks[blocks.length - 1];
+      const embeds = prev?.type === 'period';
+      const dur = embeds ? passingTime + breakLength : breakLength;
+      blocks.push({
+        id: makeId(),
+        type: 'break',
+        name: breakName || 'Break',
+        duration: dur,
+        locked: true,
+        edited: false,
+        baseDuration: dur,
+      });
+    };
+
+    // Special blocks placed before Period 1 (afterPeriod === 0), e.g. homeroom.
+    pushSpecialBlocksAfter(0);
+    if (hasBreak && breakBeforePeriod === 1) pushBreak();
+
+    for (let i = 1; i <= numPeriods; i++) {
+      if (hasSplitLunch && i === effectiveSplitPeriod) {
+        // N parallel tracks sharing this period's slot. Track 1 eats first, then takes
+        // one uninterrupted class block. Track N takes one uninterrupted class block,
+        // then eats. Any tracks in between (3+ waves only) split their class around
+        // their own lunch. A middle track needs 3 passing gaps (arriving, into lunch,
+        // back from lunch) — one more than an edge track — so when middle tracks exist,
+        // the edge tracks' class block is padded to stay in sync with them.
+        const groupKey = `split-${i}`;
+        const edgeGap = splitLunchSymmetric ? passingTime : 0;
+        const edgePadding = hasMiddleWaves ? (2 * passingTime - edgeGap) : 0;
+        const edgeDuration = periodLen + edgePadding;
+        const letters = ['A', 'B', 'C', 'D', 'E', 'F'];
+        let letterIndex = 2;
+
+        const pushSplitBlock = (type: 'period' | 'lunch', name: string, duration: number) => {
+          blocks.push({
+            id: makeId(), type, name, duration,
+            locked: type === 'lunch', edited: false, baseDuration: duration,
+            splitGroup: groupKey, splitSymmetric: splitLunchSymmetric,
+          });
+        };
+
+        // Track 1: lunch first, then one full class block.
+        pushSplitBlock('lunch', 'Lunch 1', lunchLength);
+        pushSplitBlock('period', `Period ${i}B`, edgeDuration);
+
+        // Middle tracks (only present when numWaves >= 3): class, lunch, class.
+        for (let k = 2; k <= numWaves - 1; k++) {
+          const frac1 = (k - 1) / (numWaves - 1);
+          const part1 = Math.round(periodLen * frac1);
+          const part2 = periodLen - part1;
+          const letterBefore = letters[letterIndex++];
+          const letterAfter = letters[letterIndex++];
+          pushSplitBlock('period', `Period ${i}${letterBefore}`, part1);
+          pushSplitBlock('lunch', `Lunch ${k}`, lunchLength);
+          pushSplitBlock('period', `Period ${i}${letterAfter}`, part2);
+        }
+
+        // Track N: one full class block first, then lunch.
+        pushSplitBlock('period', `Period ${i}A`, edgeDuration);
+        pushSplitBlock('lunch', `Lunch ${numWaves}`, lunchLength);
+      } else if (i === effectiveAssemblyPeriod) {
+        // Two parallel tracks sharing this period's slot, in the same shape as a two-wave
+        // split lunch: one group attends first, the other attends after its class.
+        const assemblyName = splitAssemblyName || 'Assembly';
+        const pushAssemblyBlock = (type: 'period' | 'assembly', blockName: string, duration: number) => {
+          blocks.push({
+            id: makeId(), type, name: blockName, duration,
+            locked: type === 'assembly', edited: false, baseDuration: duration,
+            splitGroup: `assembly-${i}`, splitSymmetric: true, splitEdgeGap: assemblyLoadTime,
+          });
+        };
+
+        pushAssemblyBlock('assembly', `${assemblyName} 1`, splitAssemblyLength);
+        pushAssemblyBlock('period', `Period ${i}B`, assemblyClassLen);
+        pushAssemblyBlock('period', `Period ${i}A`, assemblyClassLen);
+        pushAssemblyBlock('assembly', `${assemblyName} 2`, splitAssemblyLength);
+      } else {
+        const dur = Math.max(
+          1,
+          periodLen + (i === remainderTarget ? remainder : 0) + (offsets.get(i) ?? 0)
+        );
+        blocks.push({
+          id: makeId(),
+          type: 'period',
+          name: `Period ${i}`,
+          duration: dur,
+          locked: false,
+          edited: false,
+          baseDuration: dur,
+        });
+      }
+
+      // Standalone lunch after this period (split-lunch mode handles lunch inline above instead)
+      if (!hasSplitLunch && i === lunchAfterPeriod) {
+        for (let l = 0; l < numLunches; l++) {
+          const lname = numLunches > 1
+            ? `Lunch ${String.fromCharCode(65 + l)}`
+            : 'Lunch';
+          blocks.push({
+            id: makeId(),
+            type: 'lunch',
+            name: lname,
+            duration: lunchLength,
+            locked: true,
+            edited: false,
+            baseDuration: lunchLength,
+          });
+        }
+      }
+
+      // Special blocks and a break positioned before the next period (e.g. homeroom
+      // after Period 2, then a break, before Period 3 starts) — in that order.
+      pushSpecialBlocksAfter(i);
+      if (hasBreak && breakBeforePeriod === i + 1) pushBreak();
+    }
+
+    return blocks;
+  };
+
+  if (numPeriods <= 0) return null;
+
+  // Everything outside class time depends on how blocks land next to each other (a break
+  // can absorb a passing gap, a special block can replace one), so measure it from a real
+  // layout with 1-minute periods rather than estimating. Whatever is left goes to class.
+  const probeBlocks = buildBlocks(1, 1, 0, new Map());
+  const probeEnd = Math.max(...computeBlockTimes(probeBlocks, startMins, passingTime).map(t => t.end));
+  const instructionalPool = totalMins - (probeEnd - startMins - numPeriods);
   const adjustedPool = instructionalPool - sumOffsets;
   const periodsCount = numPeriods;
 
@@ -85,150 +228,10 @@ export function generateSchedule(params: ScheduleParams): Schedule | null {
     remainder = otherPool - periodLen * otherPeriods;
     assemblyClassLen = minAssemblyClassLen;
   }
-  // Remainder goes to the first period that isn't split for lunch or an assembly.
-  let remainderTarget = 1;
-  while (remainderTarget === effectiveSplitPeriod || remainderTarget === effectiveAssemblyPeriod) {
-    remainderTarget++;
-  }
+  // With every period split there's no regular period left to take the remainder.
+  if (remainderTarget > numPeriods) assemblyClassLen += remainder;
 
-  const blocks: Block[] = [];
-
-  const pushSpecialBlocksAfter = (period: number) => {
-    for (const sb of specialBlocks) {
-      if (sb.afterPeriod === period) {
-        blocks.push({
-          id: makeId(),
-          type: 'assembly',
-          name: sb.name || 'Special Block',
-          duration: sb.length,
-          locked: true,
-          edited: false,
-          baseDuration: sb.length,
-        });
-      }
-    }
-  };
-
-  // A break directly after a period absorbs that period's passing gap into its own
-  // displayed span (starts immediately, shows passingTime + breakLength). A break
-  // preceded by anything else (e.g. a special block) shows its plain length instead,
-  // and the passing gap reappears before whichever period follows.
-  const pushBreak = () => {
-    const prev = blocks[blocks.length - 1];
-    const embeds = prev?.type === 'period';
-    const dur = embeds ? passingTime + breakLength : breakLength;
-    blocks.push({
-      id: makeId(),
-      type: 'break',
-      name: breakName || 'Break',
-      duration: dur,
-      locked: true,
-      edited: false,
-      baseDuration: dur,
-    });
-  };
-
-  // Special blocks placed before Period 1 (afterPeriod === 0), e.g. homeroom.
-  pushSpecialBlocksAfter(0);
-  if (hasBreak && breakBeforePeriod === 1) pushBreak();
-
-  for (let i = 1; i <= numPeriods; i++) {
-    if (hasSplitLunch && i === effectiveSplitPeriod) {
-      // N parallel tracks sharing this period's slot. Track 1 eats first, then takes
-      // one uninterrupted class block. Track N takes one uninterrupted class block,
-      // then eats. Any tracks in between (3+ waves only) split their class around
-      // their own lunch. A middle track needs 3 passing gaps (arriving, into lunch,
-      // back from lunch) — one more than an edge track — so when middle tracks exist,
-      // the edge tracks' class block is padded to stay in sync with them.
-      const groupKey = `split-${i}`;
-      const edgeGap = splitLunchSymmetric ? passingTime : 0;
-      const edgePadding = hasMiddleWaves ? (2 * passingTime - edgeGap) : 0;
-      const edgeDuration = periodLen + edgePadding;
-      const letters = ['A', 'B', 'C', 'D', 'E', 'F'];
-      let letterIndex = 2;
-
-      const pushSplitBlock = (type: 'period' | 'lunch', name: string, duration: number) => {
-        blocks.push({
-          id: makeId(), type, name, duration,
-          locked: type === 'lunch', edited: false, baseDuration: duration,
-          splitGroup: groupKey, splitSymmetric: splitLunchSymmetric,
-        });
-      };
-
-      // Track 1: lunch first, then one full class block.
-      pushSplitBlock('lunch', 'Lunch 1', lunchLength);
-      pushSplitBlock('period', `Period ${i}B`, edgeDuration);
-
-      // Middle tracks (only present when numWaves >= 3): class, lunch, class.
-      for (let k = 2; k <= numWaves - 1; k++) {
-        const frac1 = (k - 1) / (numWaves - 1);
-        const part1 = Math.round(periodLen * frac1);
-        const part2 = periodLen - part1;
-        const letterBefore = letters[letterIndex++];
-        const letterAfter = letters[letterIndex++];
-        pushSplitBlock('period', `Period ${i}${letterBefore}`, part1);
-        pushSplitBlock('lunch', `Lunch ${k}`, lunchLength);
-        pushSplitBlock('period', `Period ${i}${letterAfter}`, part2);
-      }
-
-      // Track N: one full class block first, then lunch.
-      pushSplitBlock('period', `Period ${i}A`, edgeDuration);
-      pushSplitBlock('lunch', `Lunch ${numWaves}`, lunchLength);
-    } else if (i === effectiveAssemblyPeriod) {
-      // Two parallel tracks sharing this period's slot, in the same shape as a two-wave
-      // split lunch: one group attends first, the other attends after its class.
-      const assemblyName = splitAssemblyName || 'Assembly';
-      const pushAssemblyBlock = (type: 'period' | 'assembly', blockName: string, duration: number) => {
-        blocks.push({
-          id: makeId(), type, name: blockName, duration,
-          locked: type === 'assembly', edited: false, baseDuration: duration,
-          splitGroup: `assembly-${i}`, splitSymmetric: true, splitEdgeGap: assemblyLoadTime,
-        });
-      };
-
-      pushAssemblyBlock('assembly', `${assemblyName} 1`, splitAssemblyLength);
-      pushAssemblyBlock('period', `Period ${i}B`, assemblyClassLen);
-      pushAssemblyBlock('period', `Period ${i}A`, assemblyClassLen);
-      pushAssemblyBlock('assembly', `${assemblyName} 2`, splitAssemblyLength);
-    } else {
-      const dur = Math.max(
-        1,
-        periodLen + (i === remainderTarget ? remainder : 0) + (offsetByPeriod.get(i) ?? 0)
-      );
-      blocks.push({
-        id: makeId(),
-        type: 'period',
-        name: `Period ${i}`,
-        duration: dur,
-        locked: false,
-        edited: false,
-        baseDuration: dur,
-      });
-    }
-
-    // Standalone lunch after this period (split-lunch mode handles lunch inline above instead)
-    if (!hasSplitLunch && i === lunchAfterPeriod) {
-      for (let l = 0; l < numLunches; l++) {
-        const lname = numLunches > 1
-          ? `Lunch ${String.fromCharCode(65 + l)}`
-          : 'Lunch';
-        blocks.push({
-          id: makeId(),
-          type: 'lunch',
-          name: lname,
-          duration: lunchLength,
-          locked: true,
-          edited: false,
-          baseDuration: lunchLength,
-        });
-      }
-    }
-
-    // Special blocks and a break positioned before the next period (e.g. homeroom
-    // after Period 2, then a break, before Period 3 starts) — in that order.
-    pushSpecialBlocksAfter(i);
-    if (hasBreak && breakBeforePeriod === i + 1) pushBreak();
-  }
+  const blocks = buildBlocks(periodLen, assemblyClassLen, remainder, offsetByPeriod);
 
   return {
     id: makeId(),

@@ -15,7 +15,9 @@ interface ScheduleViewProps {
   dispatch: Dispatch<Action>;
 }
 
-export default function ScheduleView({ schedule, passingTime, schoolName, schoolLogo, dispatch }: ScheduleViewProps) {
+export default function ScheduleView({ schedule, passingTime: builderPassingTime, schoolName, schoolLogo, dispatch }: ScheduleViewProps) {
+  // Times must use the passing time this schedule was generated with, not the Builder's current value.
+  const passingTime = schedule?.sourceParams?.passingTime ?? builderPassingTime;
   const [notification, setNotification] = useState<string | null>(null);
   const [notifiedScheduleId, setNotifiedScheduleId] = useState(schedule?.id);
 
